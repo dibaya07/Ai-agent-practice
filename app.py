@@ -1,105 +1,49 @@
 from dotenv import load_dotenv
 import os
 from langchain.chat_models import init_chat_model
-from langchain_community.document_loaders import PyMuPDFLoader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_google_genai import GoogleGenerativeAIEmbeddings
-from langchain_qdrant import QdrantVectorStore
+import requests
+from langchain.tools import tool
+from langchain_core.messages import ToolMessage, HumanMessage
 
 load_dotenv()
-user_input=input(">")
 
-loader = PyMuPDFLoader('Javascript.pdf')
-docs = loader.load()
-
-#spliting text here.
-text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-texts = text_splitter.split_documents(documents=docs)
-
-text_content = [text.page_content for text in texts]
-
-# Integrating Embedding model
-embeddings = GoogleGenerativeAIEmbeddings(model="gemini-embedding-2-preview",api_key=os.getenv("GEMINI_API_KEY"))
-
-
-url = os.getenv("QDRANT_ENDPOINT")
-api_key = os.getenv("QDRANT_ENDPOINT_API_KEY")
-
-
-#Use this to add initial or PDF content in the database.
-
-# qdrant = QdrantVectorStore.from_documents(
-#     texts,
-#     embeddings,
-#     url=url,
-#     api_key=api_key,
-#     collection_name="test_langchain",
-# )
-
-# print(qdrant)
-
-
-# Creating Retriver function. This function help us to retrive the relevant information from the database according to user prompt.
-retriver = QdrantVectorStore.from_existing_collection(
-    embedding=embeddings,
-    collection_name="test_langchain",
-    api_key=api_key,
-    url=os.getenv("QDRANT_ENDPOINT"),
-)
-
-#Using retriver function to find similar data from database.
-relevant_chunks = retriver.similarity_search(query=user_input)
-
-context=""
-
-#Extracting the main content from the retrived information and storing in a string .
-for chunk in relevant_chunks:
-    context += chunk.page_content
-
+@tool
+def get_weather(location:str):
+    """Get current weather information for a location."""
+    print("calling tool")
+    response = requests.get(f"https://wttr.in/{location}?format=3")
+    return response.text
 
 model = init_chat_model(
-    model="gemini-3.1-flash-lite",
-    model_provider="openai",
-    base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+    model="gemini-3.8-flash",
+    model_provider="google_genai",
+    # base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
     api_key=os.getenv("GEMINI_API_KEY"),
 )
 
-system_prompt=f"""
-You are a helpful assistant. Answer in under 50 words.
+model_with_tools = model.bind_tools([get_weather])
 
-Use only the provided PDF content.
+user_input = input("> ")
 
-Rules:
-- Always Answer within 50 words.
-- If the user asks any question, give a short overview.
-- Ask if they want to explore a topic or page in more detail.
-- If the user asks for a specific topic, explain only that topic.
-- Never dump the entire PDF content at once.
-- If the user asks for a page, provide a summary of that page.
+messages = [HumanMessage(content = user_input)]
 
-Examples:
 
-User: What does this PDF contain?
-Assistant: This PDF contains JavaScript learning notes covering basics, arrays, functions, DOM, events, and APIs. Would you like to explore a specific topic?
+response = model_with_tools.invoke(messages)
+messages.append(response)
 
-User: Tell me about arrays.
-Assistant: Arrays store multiple values in a single variable. You can access values using indexes and use methods like push(), pop(), and slice().
+if response.tool_calls:
+    for tool_call in response.tool_calls:
+         # Mapping to your actual functions
+        tool_map = {"get_weather": get_weather}
+        selected_tool = tool_map[tool_call["name"]]
 
-User: Give me all the details about arrays.
-Assistant: I can explain arrays step by step, including array methods and examples. Would you like to start with the basics?
-
-Context: {context}
-"""
-messages=[
-        {   "role": "system",
-            "content": system_prompt
-        },
-        {
-            "role": "user",
-            "content": user_input
-        }
-    ]
-
-response = model.invoke(messages)
-
-print ( response.content)
+        # Execute the tool
+        tool_output = selected_tool.invoke(tool_call["args"])
+        messages.append(
+                ToolMessage(
+                    content=str(tool_output),
+                    tool_call_id=tool_call["id"]
+                )
+            )
+final_response = model_with_tools.invoke(messages)
+print(final_response.content)
