@@ -1,19 +1,16 @@
 from dotenv import load_dotenv
 import os
 from langchain.chat_models import init_chat_model
-import requests
 from langchain.tools import tool
-from langchain_core.messages import ToolMessage, HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AnyMessage
+from langgraph.graph.message import add_messages
+from typing_extensions import TypedDict, Annotated
+from langgraph.graph import StateGraph, START, END
+from langgraph.prebuilt import ToolNode, tools_condition
+import operator
 
 load_dotenv()
-
-#making the tool function
-@tool
-def get_weather(location:str)-> str:
-    """Get current weather information for a location."""#this tells the model what the function does
-    response = requests.get(f"https://wttr.in/{location}?format=3", timeout=10)
-    response.raise_for_status()
-    return response.text
 
 model = init_chat_model(
     model="gemini-3.8-flash",
@@ -21,53 +18,107 @@ model = init_chat_model(
     api_key=os.getenv("GEMINI_API_KEY"),
 )
 
-#binding the tools with model
-model_with_tools = model.bind_tools([get_weather])
-user_input = input("> ") #taking user input
+@tool
+def multiply(a:int, b:int)-> int:
+    """Multipling the arguments"""
+    return a * b
 
-#Creates structured messages: system instructions and user input.
-messages = [
-    SystemMessage(content="""
-        You are a helpful assistant.
+@tool
+def add( a:int, b:int) -> int:
+    """Adding the arguments"""
+    return a + b
 
-        Rules:
-        1. Answer directly if you can answer using your knowledge.
-        2. If the user asks about current weather, use the get_weather tool.
-        3. If no available tool can help, answer using your knowledge
-           or explain your limitations.
-        4. Keep answers simple and short.
+tools=[multiply,add]
 
-        Examples:
+model_with_tools =  model.bind_tools(tools)
 
-        User: What is Python?
-        Assistant: Python is a programming language.
+class MessageState(TypedDict):
+     messages: Annotated[list[AnyMessage], operator.add]
 
-        User: What is the current weather in London?
-        Assistant: Use the get_weather tool with location="London".
+system_prompt = """
+you are an ai assistant, you see the user input if you are able to give the response you will give the response other you look for tools and if there is any relevant tools available in the available tools who is capable of giving the answer you will call that tool
+available tools:
+"""
 
-        User: What is the weather in Paris?
-        Assistant: Use the get_weather tool with location="Paris".
-    """),
-    HumanMessage(content = user_input)
-    ]
+user_input= input("> ")
 
-#making the list of available tools to tell the model 
-available_tools = {
-    "get_weather" : get_weather
-}
+def model_node(state:MessageState):
+    """LLM decides whether to call a tool or not, and if we need to call a tool then which tool to call"""
+    
+    response = model_with_tools.invoke(state["messages"][SystemMessage(content=system_prompt),HumanMessage(content=user_input)])
+    print("res", response)
+    # return 
 
-response = model_with_tools.invoke(messages) #calling the model , here model decide he need a tool or not 
-messages.append(response) #storing the assistant's reply for history
+# def tool_node(state: MessageState):
+#     """This will decide which if model need to call which tool to call."""
 
-if response.tool_calls: #checking is model need a tool call, if yes
-    for tool_call in response.tool_calls: #here will check which tool model wanted to call
-        selected_tool = available_tools[tool_call["name"]] #selecting the tool from available tool list 
-        result = selected_tool.invoke(tool_call["args"]) #calling the tool for required information
-        tool_message = ToolMessage(
-            content=str(result), tool_call_id=tool_call["id"] #converting the tool's output into proper format
-        )
-        messages.append(tool_message) #storing the tools output as well
-    final_output = model_with_tools.invoke(messages) #sending the tools output to model to generate the proper final answer 
-    print('Assitant', final_output.content[0]['text'])
-else: #if model don't need a tool call then reply what ever answer model generated.
-    print("Assistant", response.content)
+
+graph_builder = StateGraph(MessageState)
+
+graph_builder.add_node("model_node",model_node)
+# graph_builder.add_node("tool_node",tool_node)
+
+graph_builder.add_edge(START,"model_node")
+
+
+
+graph = graph_builder.compile()
+
+print(graph)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# def model_node(state: MessageState):
+#     """LLM decides whether to call a tool or not, And if we need to call a tool then which tool to call"""
+#     response = model_with_tools.invoke(state["messages"])
+#     print("model_node_response", response)
+#     return {"messages": [response]}
+
+# graph_builder = StateGraph(MessageState)
+
+# graph_builder.add_node("model_node", model_node)
+# graph_builder.add_node("tool_node", ToolNode(tools))
+
+# graph_builder.add_edge(START,"model_node")
+
+# graph_builder.add_conditional_edges(
+#     "model_node",
+#     tools_condition,
+#      {"tools": "tool_node", "__end__": END}
+# )
+
+# graph_builder.add_edge("tool_node","model_node")
+# # def route_query
+
+# graph = graph_builder.compile()
+
+# user_query = input("> ")
+# result = graph.invoke({
+#     "messages": [
+#         SystemMessage(
+#             content="Use the add and multiply tools for arithmetic questions. "
+#                     "Answer other questions directly. Keep answers short."
+#         ),
+#         HumanMessage(content=user_query)
+#     ]
+# })
+
+# print(result["messages"][-1].content)
